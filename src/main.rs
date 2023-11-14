@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{math::vec2, prelude::*};
 
 fn main() {
     App::new()
@@ -42,19 +42,34 @@ fn update_cursor(
     gizmos.circle_2d(point, 10., Color::WHITE);
 }
 
-const CARD_SIZE: Vec3 = Vec3::new(1., 1., 1.);
+const CARD_SIZE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
+
+fn align_grid(pos: Vec2, bounds: &Bounds, offset: Vec2) -> Vec2 {
+    ((pos * 1.0 / bounds.0.size()).floor() * bounds.0.size()) + bounds.half_size() + offset
+}
+
+#[derive(Default)]
+struct SpawnCounter(usize);
 
 fn create_card(
     world_cursor: Res<WordCursor>,
     buttons: Res<Input<MouseButton>>,
     asset_server: Res<AssetServer>,
+    mut counter: Local<SpawnCounter>,
     commands: Commands,
 ) {
-
     if buttons.just_pressed(MouseButton::Right) {
-        spawn_card(world_cursor.0, commands, asset_server);
-    }
+        let colors = [
+            "card_back_blue.png",
+            "card_back_purple.png",
+            "card_back_red.png",
+        ];
 
+        counter.0 += 1;
+        counter.0 = counter.0 % colors.len();
+
+        spawn_card(world_cursor.0, colors[counter.0], commands, asset_server);
+    }
 }
 
 fn select_card(
@@ -73,18 +88,24 @@ fn select_card(
 }
 
 fn drag_selected(
-    mut query: Query<(Entity, &mut Transform, With<Card>, With<Selected>)>,
+    mut query: Query<(Entity, &mut Transform, &Bounds, With<Card>, With<Selected>)>,
     world_cursor: Res<WordCursor>,
     mut commands: Commands,
+    mut gizmos: Gizmos,
 ) {
-    for (i, (entity, mut transform, _, _)) in query.iter_mut().enumerate() {
+    for (i, (entity, mut transform, bounds, _, _)) in query.iter_mut().enumerate() {
         let index = (i as f32) + 1.0;
         let offset = (i as f32) * 10.0;
-        let dragging = Dragging(world_cursor.0 + offset);
+        let dragging = Dragging(align_grid(world_cursor.0 + offset, bounds, Vec2::ZERO));
 
-        transform.translation = transform
-            .translation
-            .lerp(Vec3::new(offset + dragging.0.x, offset + dragging.0.y, index), 0.1 * index);
+        if i == 0 {
+            gizmos.rect_2d(*dragging, 0.0, bounds.size(), Color::WHITE);
+        }
+
+        transform.translation = transform.translation.lerp(
+            Vec3::new(offset + world_cursor.0.x, offset + world_cursor.0.y, index),
+            0.1 * index,
+        );
 
         transform.scale = transform.scale.lerp(CARD_SIZE * 1.2, 0.1);
         commands.entity(entity).insert(dragging);
@@ -120,19 +141,19 @@ fn non_selected(mut query: Query<(&mut Transform, With<Card>, Without<Selected>)
     }
 }
 
-#[derive(Resource)]
+#[derive(Resource, Deref)]
 struct WordCursor(Vec2);
 
 #[derive(Component)]
 struct Card;
 
-#[derive(Component)]
+#[derive(Component, Deref)]
 struct Dragging(Vec2);
 
 #[derive(Component)]
 struct Selected;
 
-#[derive(Component)]
+#[derive(Component, Deref)]
 struct Bounds(Rect);
 
 fn update_bounds(
@@ -152,20 +173,19 @@ fn update_bounds(
     }
 }
 
-fn spawn_card(pos: Vec2, mut commands: Commands, asset_server: Res<AssetServer>) {
+fn spawn_card(pos: Vec2, card: &str, mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         Card,
+        Dragging(pos),
         Bounds(Rect::new(0.0, 0.0, 0.0, 0.0)),
         SpriteBundle {
-            texture: asset_server.load("card_back.png"),
-            transform: Transform::from_xyz(pos.x, pos.y, 0.).with_scale(CARD_SIZE),
+            texture: asset_server.load(card.to_string()),
+            transform: Transform::from_xyz(0., 0., 0.).with_scale(CARD_SIZE),
             ..default()
         },
     ));
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
-
-    spawn_card(Vec2::new(0.0, 0.0), commands, asset_server);
 }
