@@ -1,4 +1,4 @@
-use bevy::{math::vec2, prelude::*};
+use bevy::{math::vec2, prelude::*, utils::HashMap};
 
 fn main() {
     App::new()
@@ -15,6 +15,8 @@ fn main() {
                 non_selected,
                 select_card,
                 create_card,
+                show_piles,
+                align_placed,
             ),
         )
         .run();
@@ -44,8 +46,10 @@ fn update_cursor(
 
 const CARD_SIZE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
 
-fn align_grid(pos: Vec2, bounds: &Bounds, offset: Vec2) -> Vec2 {
-    ((pos * 1.0 / bounds.0.size()).floor() * bounds.0.size()) + bounds.half_size() + offset
+fn align_grid(bounds: &Bounds, offset: Vec2) -> Vec2 {
+    ((bounds.center() * 1.0 / bounds.0.size()).floor() * bounds.0.size())
+        + bounds.half_size()
+        + offset
 }
 
 #[derive(Default)]
@@ -66,11 +70,14 @@ fn create_card(
         ];
 
         counter.0 += 1;
-        counter.0 = counter.0 % colors.len();
+        counter.0 %= colors.len();
 
         spawn_card(world_cursor.0, colors[counter.0], commands, asset_server);
     }
 }
+
+type SelectedCard = (With<Card>, With<Selected>);
+type UnselectedCard = (With<Card>, Without<Selected>);
 
 fn select_card(
     query: Query<(Entity, &Bounds, With<Card>)>,
@@ -81,6 +88,7 @@ fn select_card(
     for (entity, bounds, _) in &query {
         if buttons.just_pressed(MouseButton::Left) && bounds.0.contains(world_cursor.0) {
             commands.entity(entity).insert(Selected);
+            commands.entity(entity).remove::<Pile>();
         } else if buttons.just_released(MouseButton::Left) {
             commands.entity(entity).remove::<Selected>();
         }
@@ -88,18 +96,21 @@ fn select_card(
 }
 
 fn drag_selected(
-    mut query: Query<(Entity, &mut Transform, &Bounds, With<Card>, With<Selected>)>,
+    mut query: Query<(Entity, &mut Transform, &Bounds, SelectedCard)>,
     world_cursor: Res<WordCursor>,
     mut commands: Commands,
     mut gizmos: Gizmos,
 ) {
-    for (i, (entity, mut transform, bounds, _, _)) in query.iter_mut().enumerate() {
+    for (i, (entity, mut transform, bounds, _)) in query.iter_mut().enumerate() {
         let index = (i as f32) + 1.0;
         let offset = (i as f32) * 10.0;
-        let dragging = Dragging(align_grid(world_cursor.0 + offset, bounds, Vec2::ZERO));
+
+        let dragging = Dragging(world_cursor.0);
 
         if i == 0 {
-            gizmos.rect_2d(*dragging, 0.0, bounds.size(), Color::WHITE);
+            let target_bounds = Bounds(Rect::from_center_size(world_cursor.0, bounds.size()));
+            let grid_pos = align_grid(&target_bounds, Vec2::ZERO);
+            gizmos.rect_2d(grid_pos, 0.0, target_bounds.size(), Color::WHITE);
         }
 
         transform.translation = transform.translation.lerp(
@@ -112,26 +123,36 @@ fn drag_selected(
     }
 }
 
+fn show_piles(query: Query<(&Pile, &Bounds)>, mut gizmos: Gizmos) {
+    let mut pile_counts = HashMap::new();
+    for (pile, _bounds) in &query {
+        pile_counts.entry(pile).and_modify(|c| *c += 1).or_insert(1);
+    }
+
+    for (pile, bounds) in &query {
+        let count = pile_counts[pile];
+        if count > 1 {
+            gizmos.circle_2d(pile.pos() + bounds.half_size(), 20.0, Color::ORANGE_RED);
+        }
+    }
+}
+
 fn finish_drag_selected(
-    mut query: Query<(
-        Entity,
-        &Dragging,
-        &mut Transform,
-        With<Card>,
-        Without<Selected>,
-    )>,
+    mut query: Query<(Entity, &Dragging, &mut Transform, UnselectedCard)>,
     mut commands: Commands,
 ) {
-    for (entity, dragging, mut transform, _, _) in &mut query {
-        if transform.translation.xy() == dragging.0 {
+    for (entity, dragging, mut transform, _) in &mut query {
+        if transform.translation.xy().floor() == dragging.0.floor() {
+            println!("finished dragging: {:?}", entity);
             commands.entity(entity).remove::<Dragging>();
+            commands.entity(entity).insert(Pile::new(dragging.0));
         }
 
         transform.translation = transform
             .translation
-            .lerp(Vec3::new(dragging.0.x, dragging.0.y, 0.0), 0.1);
+            .lerp(Vec3::new(dragging.0.x, dragging.0.y, 0.0), 0.15);
 
-        transform.scale = transform.scale.lerp(CARD_SIZE * 1.2, 0.1);
+        transform.scale = transform.scale.lerp(CARD_SIZE, 0.15);
     }
 }
 
@@ -141,11 +162,33 @@ fn non_selected(mut query: Query<(&mut Transform, With<Card>, Without<Selected>)
     }
 }
 
+fn align_placed(mut query: Query<(&Bounds, &mut Dragging, UnselectedCard)>) {
+    for (bounds, mut dragging, _) in &mut query {
+        dragging.0 = align_grid(
+            &Bounds(Rect::from_center_size(dragging.0, bounds.size() * 1.2)),
+            Vec2::ZERO,
+        );
+    }
+}
+
 #[derive(Resource, Deref)]
 struct WordCursor(Vec2);
 
 #[derive(Component)]
 struct Card;
+
+#[derive(Component, PartialEq, Eq, Hash)]
+struct Pile(i32, i32);
+
+impl Pile {
+    fn new(pos: Vec2) -> Self {
+        Self(pos.x as i32, pos.y as i32)
+    }
+
+    fn pos(&self) -> Vec2 {
+        vec2(self.0 as f32, self.1 as f32)
+    }
+}
 
 #[derive(Component, Deref)]
 struct Dragging(Vec2);
@@ -177,7 +220,7 @@ fn spawn_card(pos: Vec2, card: &str, mut commands: Commands, asset_server: Res<A
     commands.spawn((
         Card,
         Dragging(pos),
-        Bounds(Rect::new(0.0, 0.0, 0.0, 0.0)),
+        Bounds(Rect::new(0.0, 0.0, 100.0, 100.0)),
         SpriteBundle {
             texture: asset_server.load(card.to_string()),
             transform: Transform::from_xyz(0., 0., 0.).with_scale(CARD_SIZE),
