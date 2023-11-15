@@ -1,10 +1,17 @@
-use bevy::{math::vec2, prelude::*, utils::HashMap};
+use bevy::{
+    core_pipeline::clear_color::ClearColorConfig,
+    math::{vec2, vec3},
+    prelude::*,
+    render::view::RenderLayers,
+    utils::HashMap,
+};
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .insert_resource(WordCursor(Vec2::ZERO))
         .add_systems(Startup, setup)
+        //.add_plugins(bevy_editor_pls::EditorPlugin::default())
         .add_systems(
             Update,
             (
@@ -17,18 +24,20 @@ fn main() {
                 create_card,
                 show_piles,
                 align_placed,
+                animate_sprite,
+                move_player_system,
             ),
         )
         .run();
 }
 
 fn update_cursor(
-    camera_query: Query<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform, With<CardsCamera>)>,
     windows: Query<&Window>,
     mut world_cursor: ResMut<WordCursor>,
     mut gizmos: Gizmos,
 ) {
-    let (camera, camera_transform) = camera_query.single();
+    let (camera, camera_transform, _) = camera_query.single();
 
     let Some(cursor_position) = windows.single().cursor_position() else {
         return;
@@ -220,6 +229,7 @@ fn spawn_card(pos: Vec2, card: &str, mut commands: Commands, asset_server: Res<A
     commands.spawn((
         Card,
         Dragging(pos),
+        RenderLayers::layer(0),
         Bounds(Rect::new(0.0, 0.0, 100.0, 100.0)),
         SpriteBundle {
             texture: asset_server.load(card.to_string()),
@@ -229,6 +239,140 @@ fn spawn_card(pos: Vec2, card: &str, mut commands: Commands, asset_server: Res<A
     ));
 }
 
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
+#[derive(Component)]
+struct AnimationIndices {
+    first: usize,
+    last: usize,
+}
+
+#[derive(Component, Deref, DerefMut)]
+struct AnimationTimer(Timer);
+
+fn animate_sprite(
+    time: Res<Time>,
+    mut query: Query<(
+        &AnimationIndices,
+        &mut AnimationTimer,
+        &mut TextureAtlasSprite,
+    )>,
+) {
+    for (indices, mut timer, mut sprite) in &mut query {
+        timer.tick(time.delta());
+        if timer.just_finished() {
+            sprite.index = if sprite.index >= indices.last {
+                indices.first
+            } else {
+                sprite.index + 1
+            };
+        }
+    }
+}
+
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
+) {
+    let texture_handle = asset_server.load("adventurer-sheet.png");
+    let texture_atlas =
+        TextureAtlas::from_grid(texture_handle, Vec2::new(50.0, 37.0), 7, 10, None, None);
+    let texture_atlas_handle = texture_atlases.add(texture_atlas);
+
+    // Use only the subset of sprites in the sheet that make up the run animation
+    let run_animation_indices = AnimationIndices { first: 8, last: 13 };
+
+    spawn_player(&mut commands, texture_atlas_handle, run_animation_indices);
+    commands.spawn((
+        Camera2dBundle {
+            camera_2d: Camera2d {
+                // disable clearing completely (pixels stay as they are)
+                // (preserves output from previous frame or camera/pass)
+                clear_color: ClearColorConfig::None,
+            },
+            camera: Camera {
+                order: 1,
+                ..default()
+            },
+            ..default()
+        },
+        RenderLayers::from_layers(&[0]),
+        CardsCamera,
+    ));
+
+    commands.spawn((
+        Camera2dBundle {
+            camera: Camera {
+                order: 0,
+                ..default()
+            },
+            ..default()
+        },
+        RenderLayers::from_layers(&[1]),
+        PlayerCamera,
+    ));
+}
+
+fn move_player_system(
+    mut query: Query<(&mut Transform, &mut AnimationIndices, With<Player>)>,
+    keys: Res<Input<KeyCode>>,
+) {
+    let (mut player_transform, mut anim, _) = query.single_mut();
+
+    let mut velocity = Vec2::ZERO;
+
+    if keys.pressed(KeyCode::W) {
+        velocity.y = 1.0;
+    }
+
+    if keys.pressed(KeyCode::S) {
+        velocity.y = -1.0;
+    }
+
+    if keys.pressed(KeyCode::A) {
+        velocity.x = -1.0;
+    }
+
+    if keys.pressed(KeyCode::D) {
+        velocity.x = 1.0;
+    }
+
+    *anim = AnimationIndices { first: 8, last: 13 };
+    if velocity.x < 0.0 {
+        player_transform.scale.x = -3.0;
+    } else if velocity.x > 0.0 {
+        player_transform.scale.x = 3.0;
+    } else {
+        *anim = AnimationIndices { first: 0, last: 3 };
+    }
+
+    player_transform.translation += (velocity.normalize_or_zero() * 10.0).extend(0.0);
+}
+
+#[derive(Component)]
+struct CardsCamera;
+
+#[derive(Component)]
+struct PlayerCamera;
+
+#[derive(Component)]
+struct Player;
+
+fn spawn_player(
+    commands: &mut Commands,
+    texture_atlas_handle: Handle<TextureAtlas>,
+    animation_indices: AnimationIndices,
+) {
+    commands.spawn((
+        Player,
+        SpriteSheetBundle {
+            texture_atlas: texture_atlas_handle,
+            sprite: TextureAtlasSprite::new(animation_indices.first),
+            transform: Transform::from_scale(Vec3::splat(3.0))
+                .with_translation(vec3(0.0, 0.0, 0.0)),
+            ..default()
+        },
+        RenderLayers::layer(1),
+        animation_indices,
+        AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
+    ));
 }
